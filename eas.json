@@ -1,0 +1,7 @@
+{
+  "build": {
+    "development": { "developmentClient": true, "distribution": "internal", "env": { "SWAY_ATTEST_ENV": "development" } },
+    "preview": { "distribution": "internal" },
+    "production": {}
+  }
+}

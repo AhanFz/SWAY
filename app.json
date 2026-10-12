@@ -1,0 +1,23 @@
+{
+  "expo": {
+    "name": "Sway",
+    "slug": "sway",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "supportsTablet": false
+    },
+    "android": {
+      "predictiveBackGestureEnabled": true
+    },
+    "plugins": [
+      "expo-router",
+      "expo-font",
+      "expo-sqlite",
+      "expo-secure-store",
+      "expo-sharing"
+    ],
+    "scheme": "sway"
+  }
+}

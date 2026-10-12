@@ -1,0 +1,44 @@
+import { PGlite } from '@electric-sql/pglite';
+import { readFileSync } from 'node:fs';
+import assert from 'node:assert/strict';
+const db = new PGlite();
+await db.exec('create role anon; create role authenticated; create role service_role bypassrls; grant usage on schema public to anon,authenticated,service_role;');
+await db.exec(readFileSync(new URL('../supabase/migrations/20261004222133_sway_core.sql', import.meta.url), 'utf8'));
+await db.exec(readFileSync(new URL('../supabase/migrations/20261006210000_free_hourly_news.sql', import.meta.url), 'utf8'));
+const hash = 'a'.repeat(64), otherHash = 'b'.repeat(64);
+const ids = (await db.query("insert into stories(headline,summary,topic,published_at) select 'Test '||n,'Test source summary','Tech',now() from generate_series(1,62) n returning id")).rows.map(r => r.id);
+async function challenge(h=hash) { const value=crypto.randomUUID()+crypto.randomUUID(); await db.query('select new_challenge($1,$2)',[h,value]); return value; }
+async function vote(id,value,h=hash) { return db.query('select record_response($1,$2,$3,$4,null,null) as value',[id,h,value,await challenge(h)]); }
+await db.exec('set role service_role');
+await vote(ids[0],'skip');
+await assert.rejects(vote(ids[0],'good'),/response_final/);
+const duplicate=await vote(ids[0],'skip');assert.equal(duplicate.rows[0].value.duplicate,true);
+const tally=(await db.query('select * from story_totals where story_id=$1',[ids[0]])).rows[0];assert.equal(tally.skip_count,1);assert.equal(tally.good_count,0);
+for (let i=1;i<60;i++) await vote(ids[i],'good');
+await assert.rejects(vote(ids[60],'bad'),/rate_limited/);
+await vote(ids[60],'bad',otherHash);
+await assert.rejects(db.query('select record_response($1,$2,$3,$4,null,null)',[ids[61],hash,'good','invented-challenge']),/invalid_challenge/);
+const ch=await challenge(otherHash);
+await db.query('select register_attestation($1,$2,$3,$4)',[otherHash,ch,'test-key','test-public-key']);
+await assert.rejects(db.query('select record_response($1,$2,$3,$4,$5,$6)',[ids[61],otherHash,'good',await challenge(otherHash),'test-key',0]),/invalid_assertion/);
+await db.query('select record_response($1,$2,$3,$4,$5,$6)',[ids[61],otherHash,'good',await challenge(otherHash),'test-key',1]);
+await assert.rejects(db.query('select record_response($1,$2,$3,$4,$5,$6)',[ids[61],otherHash,'good',await challenge(otherHash),'test-key',1]),/invalid_assertion/);
+// Hourly news batch: creates stories, attaches a second outlet to an existing story, ignores repeats.
+const storyId=crypto.randomUUID(),at=new Date().toISOString();
+const article=(url,outlet)=>({article_url:url,story_id:storyId,outlet_name:outlet,headline:'Quake strikes',description:'A quake struck the region on Monday.',published_at:at});
+const created=await db.query('select ingest_news($1::jsonb,$2::jsonb) as n',[JSON.stringify([{id:storyId,headline:'Quake strikes',summary:'A quake struck the region on Monday.',topic:'World',published_at:at}]),JSON.stringify([article('https://example.org/a','Outlet A')])]);
+assert.equal(created.rows[0].n,1);
+await db.query('select ingest_news($1::jsonb,$2::jsonb)',['[]',JSON.stringify([article('https://example.org/a','Outlet A'),article('https://example.net/b','Outlet B')])]);
+assert.equal((await db.query('select count(*)::int as n from story_sources where story_id=$1',[storyId])).rows[0].n,2);
+assert.equal((await db.query('select count(*)::int as n from news_items where story_id=$1',[storyId])).rows[0].n,2);
+await assert.rejects(db.query('select ingest_news($1::jsonb,$2::jsonb)',[JSON.stringify([{id:crypto.randomUUID(),headline:'x',summary:'y',topic:'Invented',published_at:at}]),'[]']),/check constraint/);
+assert.ok((await db.query('select count(*)::int as n from feeds where active')).rows[0].n>=20);
+await db.exec('set role anon');
+for(const table of ['responses','story_totals','attest_keys','attest_challenges','news_items']) await assert.rejects(db.query(`select * from ${table}`),/permission denied/);
+await assert.rejects(db.query('select record_response($1,$2,$3,$4,null,null)',[ids[0],hash,'good','test']),/permission denied/);
+await assert.rejects(db.query("select ingest_news('[]'::jsonb,'[]'::jsonb)"),/permission denied/);
+await db.exec('reset role');
+const rls=(await db.query("select count(*)::int as n from pg_class where relname in ('feeds','stories','story_sources','responses','story_totals','attest_keys','attest_challenges','news_items','pipeline_locks') and relrowsecurity")).rows[0].n;
+assert.equal(rls,9);
+await db.close();
+console.log('PASS: final responses, idempotent retry, trigger tallies, 60/minute limit, per-device isolation, challenge and assertion replay rejection, client table/function denial, RLS on all 9 tables, batched news ingestion.');
